@@ -9,7 +9,14 @@ import plotly.graph_objects as go
 
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Unusual Options Activity Scanner", layout="wide")
-
+# Hide the Streamlit menu and footer to make it look professional
+hide_menu_style = """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        </style>
+        """
+st.markdown(hide_menu_style, unsafe_allow_html=True)
 # --- CONFIGURATION ---
 DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
 
@@ -98,7 +105,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
 
 # --- USER INTERFACE ---
 st.title(" Unusual Options Activity (UOA) Scanner")
-st.markdown("A clean, visual interface to detect smart money flows. No coding required.")
+
 
 with st.sidebar:
     st.header("⚙️ Configuration")
