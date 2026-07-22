@@ -8,7 +8,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 warnings.filterwarnings('ignore')
-st.set_page_config(page_title="Unusual Options Activity Scanner", layout="wide")
+
+# Hide the Streamlit menu and footer
+hide_menu_style = """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        </style>
+        """
+st.markdown(hide_menu_style, unsafe_allow_html=True)
+
 st.set_page_config(
     page_title="Unusual Options Activity Scanner",
     layout="wide",
@@ -18,7 +27,6 @@ st.set_page_config(
         'About': None
     }
 )
-st.markdown(hide_menu_style, unsafe_allow_html=True)
 # --- CONFIGURATION ---
 DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
 
