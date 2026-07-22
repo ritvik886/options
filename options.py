@@ -27,6 +27,7 @@ st.set_page_config(
         'About': None
     }
 )
+
 # --- CONFIGURATION ---
 DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
 
@@ -40,6 +41,35 @@ def get_avg_iv(ticker):
             return float(hist['Close'].pct_change().dropna().std() * np.sqrt(252))
     except: pass
     return 0.25
+
+@st.cache_data(ttl=3600)
+def get_historical_options_volume(ticker, weeks_back=4):
+    """Get average weekly options volume for the past X weeks"""
+    try:
+        tkr = yf.Ticker(ticker)
+        expiries = tkr.options[:5]
+        
+        total_calls_vol = 0
+        total_puts_vol = 0
+        count = 0
+        
+        for exp in expiries:
+            try:
+                chain = tkr.option_chain(exp)
+                if not chain.calls.empty:
+                    total_calls_vol += chain.calls['volume'].fillna(0).sum()
+                    total_puts_vol += chain.puts['volume'].fillna(0).sum()
+                    count += 1
+            except:
+                continue
+        
+        if count > 0:
+            avg_weekly_calls = total_calls_vol / count
+            avg_weekly_puts = total_puts_vol / count
+            return avg_weekly_calls, avg_weekly_puts
+        return 0, 0
+    except:
+        return 0, 0
 
 @st.cache_data(ttl=300)
 def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
@@ -116,7 +146,6 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
 # --- USER INTERFACE ---
 st.title(" Unusual Options Activity (UOA) Scanner")
 
-
 with st.sidebar:
     st.header("⚙️ Configuration")
     tickers_input = st.text_input("Tickers (comma separated)", value=DEFAULT_TICKERS)
@@ -139,42 +168,64 @@ if scan_btn:
     else:
         st.success(f"Found {len(df)} unusual contracts!")
         
-        # --- NEW PRO DASHBOARD CHARTS ---
-        st.subheader("📊 Smart Money Dashboard")
-        col1, col2 = st.columns(2)
+        # Call vs Put Volume Chart
+        st.subheader("📊 Unusual Volume: Calls vs Puts")
+        skew_data = []
+        for ticker in df['ticker'].unique():
+            tkr_df = df[df['ticker'] == ticker]
+            c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+            p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+            skew_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': c_vol})
+            skew_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': p_vol})
         
-        with col1:
-            # Call vs Put Volume Chart
-            skew_data = []
-            for ticker in df['ticker'].unique():
-                tkr_df = df[df['ticker'] == ticker]
-                c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
-                p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                skew_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': c_vol})
-                skew_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': p_vol})
+        skew_df = pd.DataFrame(skew_data)
+        fig1 = px.bar(skew_df, x='Ticker', y='Volume', color='Type', 
+                      barmode='group', title="Call vs Put Volume",
+                      color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
+        fig1.update_layout(template='plotly_dark')
+        st.plotly_chart(fig1, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # Historical Volume Comparison Table
+        st.subheader(" Historical Volume Comparison (Current vs Normal)")
+        st.markdown("Shows how much more volume is trading compared to normal weekly averages")
+        
+        comparison_data = []
+        for ticker in df['ticker'].unique():
+            tkr_df = df[df['ticker'] == ticker]
+            current_calls = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+            current_puts = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
             
-            skew_df = pd.DataFrame(skew_data)
-            fig1 = px.bar(skew_df, x='Ticker', y='Volume', color='Type', 
-                          barmode='group', title="Unusual Volume: Calls vs Puts",
-                          color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
-            fig1.update_layout(template='plotly_dark')
-            st.plotly_chart(fig1, use_container_width=True)
+            hist_calls, hist_puts = get_historical_options_volume(ticker)
             
-        with col2:
-            # Top Unusualness Scores Chart
-            top_10 = df.head(10)
-            top_10['Label'] = top_10['ticker'] + ' ' + top_10['strike'].astype(str) + ' ' + top_10['type']
+            if hist_calls > 0 and current_calls > 0:
+                calls_multiplier = current_calls / hist_calls
+            else:
+                calls_multiplier = 0
             
-            fig2 = px.bar(top_10, x='Label', y='unusualness_score', 
-                          title="Top 10 Most Unusual Contracts",
-                          color='unusualness_score', color_continuous_scale='Viridis')
-            fig2.update_layout(template='plotly_dark')
-            st.plotly_chart(fig2, use_container_width=True)
-
+            if hist_puts > 0 and current_puts > 0:
+                puts_multiplier = current_puts / hist_puts
+            else:
+                puts_multiplier = 0
+            
+            comparison_data.append({
+                'Ticker': ticker,
+                'Current Call Volume': f"{current_calls:,}",
+                'Normal Call Volume': f"{int(hist_calls):,}",
+                'Call Multiplier': f"{calls_multiplier:.1f}x" if calls_multiplier > 0 else "N/A",
+                'Current Put Volume': f"{current_puts:,}",
+                'Normal Put Volume': f"{int(hist_puts):,}",
+                'Put Multiplier': f"{puts_multiplier:.1f}x" if puts_multiplier > 0 else "N/A",
+            })
+        
+        if comparison_data:
+            st.dataframe(pd.DataFrame(comparison_data), use_container_width=True, hide_index=True)
+        
         st.markdown("---")
         
         # Tabbed Interface for Tables
-        tab1, tab2 = st.tabs(["📥 Full Data & Export", "📊 Directional Skew Table"])
+        tab1, tab2 = st.tabs([" Full Data & Export", "📊 Directional Skew Table"])
         
         with tab1:
             st.subheader("Complete Unusual Activity Dataset")
@@ -182,7 +233,7 @@ if scan_btn:
             st.dataframe(df[display_cols].round({'iv': 4, 'premium': 2, 'unusualness_score': 2}), use_container_width=True, hide_index=True)
             
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download Full Results as CSV", data=csv, file_name="uoa_scan_results.csv", mime="text/csv")
+            st.download_button(" Download Full Results as CSV", data=csv, file_name="uoa_scan_results.csv", mime="text/csv")
 
         with tab2:
             st.subheader("Net Unusual Volume: Calls vs. Puts")
