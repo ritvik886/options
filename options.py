@@ -5,18 +5,8 @@ import numpy as np
 from datetime import datetime
 import warnings
 import plotly.express as px
-import plotly.graph_objects as go
 
 warnings.filterwarnings('ignore')
-
-# Hide the Streamlit menu and footer
-hide_menu_style = """
-        <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        </style>
-        """
-st.markdown(hide_menu_style, unsafe_allow_html=True)
 
 st.set_page_config(
     page_title="Unusual Options Activity Scanner",
@@ -27,6 +17,15 @@ st.set_page_config(
         'About': None
     }
 )
+
+# Hide the Streamlit menu and footer
+hide_menu_style = """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        </style>
+        """
+st.markdown(hide_menu_style, unsafe_allow_html=True)
 
 # --- CONFIGURATION ---
 DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
@@ -43,7 +42,7 @@ def get_avg_iv(ticker):
     return 0.25
 
 @st.cache_data(ttl=3600)
-def get_historical_options_volume(ticker, weeks_back=4):
+def get_historical_options_volume(ticker):
     """Get average weekly options volume for the past X weeks"""
     try:
         tkr = yf.Ticker(ticker)
@@ -111,7 +110,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     
     today = datetime.now().date()
     df['days_to_expiry'] = (pd.to_datetime(df['expiry']) - pd.Timestamp(today)).dt.days
-    df['expiry_flag'] = np.where(df['days_to_expiry'] <= 14, '⚠️ <14d', 'OK')
+    df['expiry_flag'] = np.where(df['days_to_expiry'] <= 14, '️ <14d', 'OK')
     
     df['vol_oi_ratio'] = safe_ratio(df['volume'], df['open_interest'])
     df['vol_avg_ratio'] = safe_ratio(df['volume'], df['avg_volume_20d'])
@@ -144,8 +143,112 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     return df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
 
 # --- USER INTERFACE ---
-st.title(" Unusual Options Activity (UOA) Scanner")
+st.title("🔍 Unusual Options Activity (UOA) Scanner")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
-   
+    tickers_input = st.text_input("Tickers (comma separated)", value=DEFAULT_TICKERS)
+    
+    st.subheader("Thresholds")
+    vol_oi = st.slider("Vol / OI Ratio", 1.0, 10.0, 3.0, 0.5)
+    vol_avg = st.slider("Vol / Avg Vol Ratio", 1.0, 10.0, 5.0, 0.5)
+    min_prem = st.number_input("Min Premium ($)", value=100000, step=50000)
+    otm_pct = st.slider("OTM % Threshold", 0.05, 0.25, 0.10, 0.05)
+    iv_mult = st.slider("IV Spike Multiplier", 1.0, 3.0, 1.5, 0.1)
+    
+    scan_btn = st.button("🚀 Run Scan", type="primary", use_container_width=True)
+
+if scan_btn:
+    with st.spinner("Fetching live options chains and analyzing..."):
+        df = scan_options(tickers_input, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
+    
+    if df.empty:
+        st.warning("No unusual activity detected for these tickers with current thresholds. Try widening the sliders in the sidebar.")
+    else:
+        st.success(f"Found {len(df)} unusual contracts!")
+        
+        # Create main tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs & Visuals", " Historical Comparison", "📋 Complete Dataset", "📉 Directional Skew"])
+        
+        # TAB 1: GRAPHS & VISUALS
+        with tab1:
+            st.subheader("Unusual Volume: Calls vs Puts")
+            
+            # Call vs Put Volume Chart
+            skew_data = []
+            for ticker in df['ticker'].unique():
+                tkr_df = df[df['ticker'] == ticker]
+                c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+                p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                skew_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': c_vol})
+                skew_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': p_vol})
+            
+            skew_df = pd.DataFrame(skew_data)
+            fig1 = px.bar(skew_df, x='Ticker', y='Volume', color='Type', 
+                          barmode='group', title="Call vs Put Volume",
+                          color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
+            fig1.update_layout(template='plotly_dark')
+            st.plotly_chart(fig1, use_container_width=True)
+            
+            st.markdown("---")
+            st.markdown("**Green bars** = Call volume (bullish bets) | **Red bars** = Put volume (bearish bets)")
+        
+        # TAB 2: HISTORICAL COMPARISON
+        with tab2:
+            st.subheader("Historical Volume Comparison (Current vs Normal)")
+            st.markdown("Shows how much more volume is trading compared to normal weekly averages")
+            
+            comparison_data = []
+            for ticker in df['ticker'].unique():
+                tkr_df = df[df['ticker'] == ticker]
+                current_calls = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+                current_puts = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                
+                hist_calls, hist_puts = get_historical_options_volume(ticker)
+                
+                if hist_calls > 0 and current_calls > 0:
+                    calls_multiplier = current_calls / hist_calls
+                else:
+                    calls_multiplier = 0
+                
+                if hist_puts > 0 and current_puts > 0:
+                    puts_multiplier = current_puts / hist_puts
+                else:
+                    puts_multiplier = 0
+                
+                comparison_data.append({
+                    'Ticker': ticker,
+                    'Current Call Volume': f"{current_calls:,}",
+                    'Normal Call Volume': f"{int(hist_calls):,}",
+                    'Call Multiplier': f"{calls_multiplier:.1f}x" if calls_multiplier > 0 else "N/A",
+                    'Current Put Volume': f"{current_puts:,}",
+                    'Normal Put Volume': f"{int(hist_puts):,}",
+                    'Put Multiplier': f"{puts_multiplier:.1f}x" if puts_multiplier > 0 else "N/A",
+                })
+            
+            if comparison_data:
+                st.dataframe(pd.DataFrame(comparison_data), use_container_width=True, hide_index=True)
+                st.markdown("**Multiplier** shows how many times higher current volume is vs normal. Example: 1000x means 1000 times more volume than usual!")
+        
+        # TAB 3: COMPLETE DATASET
+        with tab3:
+            st.subheader("Complete Unusual Activity Dataset")
+            display_cols = ['ticker', 'type', 'strike', 'expiry', 'volume', 'open_interest', 'iv', 'premium', 'unusualness_score', 'expiry_flag']
+            st.dataframe(df[display_cols].round({'iv': 4, 'premium': 2, 'unusualness_score': 2}), use_container_width=True, hide_index=True)
+            
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download Full Results as CSV", data=csv, file_name="uoa_scan_results.csv", mime="text/csv")
+        
+        # TAB 4: DIRECTIONAL SKEW
+        with tab4:
+            st.subheader("Net Unusual Volume: Calls vs. Puts")
+            skew_table = []
+            for ticker in df['ticker'].unique():
+                tkr_df = df[df['ticker'] == ticker]
+                c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+                p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                skew_table.append({'Ticker': ticker, 'Call Vol': f"{c_vol:,}", 'Put Vol': f"{p_vol:,}", 'Net Skew (C-P)': f"{c_vol - p_vol:,}", 'Bias': ' BULLISH' if (c_vol - p_vol) > 0 else '🔴 BEARISH' if (c_vol - p_vol) < 0 else '⚪ NEUTRAL'})
+            st.dataframe(pd.DataFrame(skew_table), use_container_width=True, hide_index=True)
+            
+            st.markdown("---")
+            st.info("**🟢 BULLISH** = More call volume (betting stock goes up) | **🔴 BEARISH** = More put volume (betting stock goes down)")
