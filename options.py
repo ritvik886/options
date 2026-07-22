@@ -4,11 +4,13 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import warnings
+import plotly.express as px
+import plotly.graph_objects as go
 
 warnings.filterwarnings('ignore')
 st.set_page_config(page_title="Unusual Options Activity Scanner", layout="wide")
 
-# --- CONFIGURATION (Pre-loaded with your rules) ---
+# --- CONFIGURATION ---
 DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
 
 def safe_ratio(num, denom, cap=10.0):
@@ -35,7 +37,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
             current_price = float(hist['Close'].iloc[-1])
             avg_iv = get_avg_iv(ticker)
             
-            for exp in tkr.options[:3]: # Next 3 expirations for speed
+            for exp in tkr.options[:3]: 
                 chain = tkr.option_chain(exp)
                 for opt_type, df in [('Call', chain.calls), ('Put', chain.puts)]:
                     if df.empty: continue
@@ -49,14 +51,12 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     if not all_data: return pd.DataFrame()
     df = pd.concat(all_data, ignore_index=True)
     
-    # Clean data
     df['volume'] = df['volume'].fillna(0).astype(int)
     df['open_interest'] = df['open_interest'].fillna(0).astype(int)
     df['iv'], df['lastPrice'] = df['iv'].fillna(0.0), df['lastPrice'].fillna(0.0)
     df['avg_volume_20d'] = df['volume'].apply(lambda x: max(x * 0.2, 10.0))
     df['premium'] = df['volume'] * df['lastPrice'] * 100
     
-    # Logic flags
     df['is_deep_otm'] = np.where(
         (df['type'] == 'Call') & (df['strike'] >= df['underlying_price'] * (1 + otm_pct)), True,
         np.where((df['type'] == 'Put') & (df['strike'] <= df['underlying_price'] * (1 - otm_pct)), True, False)
@@ -70,7 +70,6 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     df['vol_avg_ratio'] = safe_ratio(df['volume'], df['avg_volume_20d'])
     df['iv_spike'] = safe_ratio(df['iv'], df['ticker_avg_iv'])
     
-    # Unusual Conditions
     conditions = [
         df['volume'] >= vol_oi * df['open_interest'],
         df['volume'] >= vol_avg * df['avg_volume_20d'],
@@ -80,7 +79,6 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     ]
     df['is_unusual'] = np.logical_or.reduce(conditions)
     
-    # Scoring
     score = pd.Series(0.0, index=df.index)
     mask = df['vol_oi_ratio'] >= vol_oi
     score[mask] += 2.0 * (df.loc[mask, 'vol_oi_ratio'] / vol_oi)
@@ -99,7 +97,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     return df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
 
 # --- USER INTERFACE ---
-st.title("🔍 Unusual Options Activity (UOA) Scanner")
+st.title(" Unusual Options Activity (UOA) Scanner")
 st.markdown("A clean, visual interface to detect smart money flows. No coding required.")
 
 with st.sidebar:
@@ -113,7 +111,7 @@ with st.sidebar:
     otm_pct = st.slider("OTM % Threshold", 0.05, 0.25, 0.10, 0.05)
     iv_mult = st.slider("IV Spike Multiplier", 1.0, 3.0, 1.5, 0.1)
     
-    scan_btn = st.button("🚀 Run Scan", type="primary", use_container_width=True)
+    scan_btn = st.button(" Run Scan", type="primary", use_container_width=True)
 
 if scan_btn:
     with st.spinner("Fetching live options chains and analyzing..."):
@@ -124,37 +122,57 @@ if scan_btn:
     else:
         st.success(f"Found {len(df)} unusual contracts!")
         
-        # Tabbed Interface
-        tab1, tab2, tab3 = st.tabs(["🏆 Top Unusual", "📊 Directional Skew", "📥 Full Data & Export"])
+        # --- NEW PRO DASHBOARD CHARTS ---
+        st.subheader("📊 Smart Money Dashboard")
+        col1, col2 = st.columns(2)
         
-        with tab1:
-            st.subheader("Top 10 Unusual Contracts (Overall)")
-            display_cols = ['ticker', 'type', 'strike', 'expiry', 'volume', 'open_interest', 'iv', 'premium', 'unusualness_score', 'expiry_flag']
-            st.dataframe(df[display_cols].head(10).round({'iv': 4, 'premium': 2, 'unusualness_score': 2}), use_container_width=True, hide_index=True)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.subheader("📈 Top 5 Calls")
-                calls = df[df['type'] == 'Call'].head(5)[display_cols].round({'iv': 4, 'premium': 2, 'unusualness_score': 2})
-                st.dataframe(calls, use_container_width=True, hide_index=True)
-            with col2:
-                st.subheader("📉 Top 5 Puts")
-                puts = df[df['type'] == 'Put'].head(5)[display_cols].round({'iv': 4, 'premium': 2, 'unusualness_score': 2})
-                st.dataframe(puts, use_container_width=True, hide_index=True)
-
-        with tab2:
-            st.subheader("Net Unusual Volume: Calls vs. Puts")
+        with col1:
+            # Call vs Put Volume Chart
             skew_data = []
             for ticker in df['ticker'].unique():
                 tkr_df = df[df['ticker'] == ticker]
                 c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
                 p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                skew_data.append({'Ticker': ticker, 'Call Vol': c_vol, 'Put Vol': p_vol, 'Net Skew (C-P)': c_vol - p_vol, 'Bias': '🟢 BULLISH' if (c_vol - p_vol) > 0 else '🔴 BEARISH' if (c_vol - p_vol) < 0 else '⚪ NEUTRAL'})
-            st.dataframe(pd.DataFrame(skew_data), use_container_width=True, hide_index=True)
+                skew_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': c_vol})
+                skew_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': p_vol})
+            
+            skew_df = pd.DataFrame(skew_data)
+            fig1 = px.bar(skew_df, x='Ticker', y='Volume', color='Type', 
+                          barmode='group', title="Unusual Volume: Calls vs Puts",
+                          color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
+            fig1.update_layout(template='plotly_dark')
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with col2:
+            # Top Unusualness Scores Chart
+            top_10 = df.head(10)
+            top_10['Label'] = top_10['ticker'] + ' ' + top_10['strike'].astype(str) + ' ' + top_10['type']
+            
+            fig2 = px.bar(top_10, x='Label', y='unusualness_score', 
+                          title="Top 10 Most Unusual Contracts",
+                          color='unusualness_score', color_continuous_scale='Viridis')
+            fig2.update_layout(template='plotly_dark')
+            st.plotly_chart(fig2, use_container_width=True)
 
-        with tab3:
+        st.markdown("---")
+        
+        # Tabbed Interface for Tables
+        tab1, tab2 = st.tabs(["📥 Full Data & Export", "📊 Directional Skew Table"])
+        
+        with tab1:
             st.subheader("Complete Unusual Activity Dataset")
-            st.dataframe(df.round({'iv': 4, 'premium': 2, 'unusualness_score': 2}), use_container_width=True, hide_index=True)
+            display_cols = ['ticker', 'type', 'strike', 'expiry', 'volume', 'open_interest', 'iv', 'premium', 'unusualness_score', 'expiry_flag']
+            st.dataframe(df[display_cols].round({'iv': 4, 'premium': 2, 'unusualness_score': 2}), use_container_width=True, hide_index=True)
             
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Full Results as CSV", data=csv, file_name="uoa_scan_results.csv", mime="text/csv")
+
+        with tab2:
+            st.subheader("Net Unusual Volume: Calls vs. Puts")
+            skew_table = []
+            for ticker in df['ticker'].unique():
+                tkr_df = df[df['ticker'] == ticker]
+                c_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+                p_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                skew_table.append({'Ticker': ticker, 'Call Vol': c_vol, 'Put Vol': p_vol, 'Net Skew (C-P)': c_vol - p_vol, 'Bias': '🟢 BULLISH' if (c_vol - p_vol) > 0 else '🔴 BEARISH' if (c_vol - p_vol) < 0 else '⚪ NEUTRAL'})
+            st.dataframe(pd.DataFrame(skew_table), use_container_width=True, hide_index=True)
