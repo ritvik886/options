@@ -5,10 +5,6 @@ import numpy as np
 from datetime import datetime
 import warnings
 import plotly.express as px
-import plotly.graph_objects as go
-import time
-import urllib.request
-import json
 
 warnings.filterwarnings('ignore')
 
@@ -26,32 +22,6 @@ hide_menu_style = """
         """
 st.markdown(hide_menu_style, unsafe_allow_html=True)
 
-# --- TWELVEDATA API CONFIGURATION ---
-# Using your API key. For production, move this to Streamlit Secrets.
-TWELVEDATA_API_KEY = "2908e4aa6d5140cf8b74bb5a09ed16b9"
-
-def get_twelvedata_history(ticker, outputsize):
-    """Fetches historical stock volume using TwelveData API (Bulletproof)"""
-    url = f"https://api.twelvedata.com/time_series?symbol={ticker}&interval=1day&outputsize={outputsize}&apikey={TWELVEDATA_API_KEY}"
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-    try:
-        with urllib.request.urlopen(req) as response:
-            data = json.loads(response.read().decode())
-            if 'values' in data:
-                # TwelveData returns newest first, we need to reverse it for graphs
-                values = data['values'][::-1]
-                df = pd.DataFrame(values)
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
-                return df
-            else:
-                return None
-    except Exception as e:
-        return None
-
-# --- SECTOR WATCHLIST (Reduced to 8 to prevent Streamlit 60s timeout) ---
-LARGE_CAP_TECH = ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AMD"]
-
 def safe_ratio(num, denom, cap=100.0):
     if isinstance(num, pd.Series):
         return np.where(denom > 0, num / denom, np.where(num > 0, cap, 0.0))
@@ -61,17 +31,16 @@ def safe_ratio(num, denom, cap=100.0):
 @st.cache_data(ttl=3600)
 def get_baseline_volume(ticker):
     try:
-        # Use TwelveData for baseline too, it's faster
-        td_df = get_twelvedata_history(ticker, 30)
-        if td_df is not None and not td_df.empty:
-            avg_stock_volume = td_df['volume'].mean()
+        tkr = yf.Ticker(ticker)
+        hist = tkr.history(period="3mo")
+        if not hist.empty:
+            avg_stock_volume = hist['Volume'].mean()
             return avg_stock_volume * 0.02, avg_stock_volume * 0.02 * 2.0 * 100
         return 50000, 1000000
     except:
         return 50000, 1000000
 
 def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
-    """Scans a single ticker options chain using Yahoo Finance"""
     try:
         tkr = yf.Ticker(ticker)
         hist = tkr.history(period="5d")
@@ -79,7 +48,6 @@ def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         current_price = float(hist['Close'].iloc[-1])
         
         all_data = []
-        # Only check next 2 expirations to stay under Streamlit's 60s timeout
         for exp in tkr.options[:2]: 
             try:
                 chain = tkr.option_chain(exp)
@@ -150,11 +118,11 @@ def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         return pd.DataFrame()
 
 # --- UI ---
-st.title("🔍 Unusual Options Activity Scanner")
+st.title(" Unusual Options Activity Scanner")
 st.markdown("**Detect unusual options flow with institutional-grade metrics**")
 
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("️ Configuration")
     tickers_input = st.text_input("Tickers (comma separated)", value="AAPL, NVDA, TSLA")
     
     st.subheader("Detection Thresholds")
@@ -164,12 +132,11 @@ with st.sidebar:
     otm_pct = st.slider("OTM % Threshold (0 = all)", 0.0, 0.30, 0.0, 0.05)
     iv_mult = st.slider("IV Multiplier (1.0 = all)", 1.0, 5.0, 1.0, 0.1)
     
-    scan_btn = st.button("🚀 Run Scan", type="primary", use_container_width=True)
+    scan_btn = st.button(" Run Scan", type="primary", use_container_width=True)
 
 # --- MAIN APP LOGIC ---
 if scan_btn:
     with st.spinner("Fetching options data..."):
-        # Batch scan for the main tabs
         all_data = []
         tickers = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
         for t in tickers:
@@ -184,97 +151,13 @@ if scan_btn:
     else:
         st.success(f"Identified {len(df)} unusual contracts!")
         
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🏆 Large Cap Tech Screener", "📈 Historical Trend (TwelveData)", "📊 Executive Summary", 
-            "💰 Premium Flow", "📋 Contract Details", "🐋 Block Trades"
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📊 Executive Summary", " Historical Volume Table", 
+            "💰 Premium Flow", "📋 Contract Details", " Block Trades"
         ])
         
-        # TAB 1: SECTOR SCREENER (Throttled to prevent timeouts)
+        # TAB 1: EXECUTIVE SUMMARY
         with tab1:
-            st.subheader("🏆 Large Cap Tech Unusual Activity Screener")
-            st.markdown(f"Scans {len(LARGE_CAP_TECH)} major tech stocks. (Takes ~30 seconds)")
-            
-            if st.button("Scan Full Large Cap Tech Sector", type="primary"):
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                sector_results = []
-                
-                for i, ticker in enumerate(LARGE_CAP_TECH):
-                    status_text.text(f"Scanning {ticker} ({i+1}/{len(LARGE_CAP_TECH)})...")
-                    
-                    tkr_df = scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
-                    
-                    if not tkr_df.empty:
-                        total_prem = float(tkr_df['premium'].sum())
-                        total_vol = int(tkr_df['volume'].sum())
-                        blocks = int(tkr_df['is_block_trade'].sum())
-                        call_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
-                        put_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                        bias = "🟢 BULLISH" if call_vol > put_vol else "🔴 BEARISH"
-                        
-                        sector_results.append({
-                            'Ticker': ticker,
-                            'Unusual Premium': total_prem,
-                            'Unusual Volume': total_vol,
-                            'Block Trades': blocks,
-                            'Bias': bias
-                        })
-                    
-                    # 1.5 second sleep to prevent Yahoo Finance rate limits
-                    time.sleep(1.5) 
-                    progress_bar.progress((i + 1) / len(LARGE_CAP_TECH))
-                
-                status_text.text("Scan Complete!")
-                
-                if sector_results:
-                    sector_df = pd.DataFrame(sector_results).sort_values('Unusual Premium', ascending=False)
-                    st.subheader("Top Companies by Unusual Premium")
-                    st.dataframe(sector_df.style.format({'Unusual Premium': '${:,.0f}', 'Unusual Volume': '{:,}'}), use_container_width=True, hide_index=True)
-                else:
-                    st.warning("No unusual activity found. Try lowering Min Premium in the sidebar to $10,000.")
-
-        # TAB 2: HISTORICAL TREND (NOW USING TWELVEDATA - BULLETPROOF)
-        with tab2:
-            st.subheader("📈 Historical Volume Trend")
-            st.markdown("Powered by TwelveData API. Identifies exact days/weeks where volume spiked.")
-            
-            hist_ticker = st.text_input("Enter Ticker for Historical View", value="AAPL").upper()
-            time_range = st.radio("Select Time Range", ["Last 5 Days", "Last 30 Days", "Last 6 Months"], horizontal=True)
-            
-            if st.button("Generate Historical Graph", type="primary"):
-                size_map = {"Last 5 Days": 5, "Last 30 Days": 30, "Last 6 Months": 126}
-                outputsize = size_map[time_range]
-                
-                with st.spinner(f"Fetching {time_range} data for {hist_ticker} from TwelveData..."):
-                    td_df = get_twelvedata_history(hist_ticker, outputsize)
-                    
-                    if td_df is not None and not td_df.empty:
-                        fig = go.Figure()
-                        fig.add_trace(go.Bar(
-                            x=td_df['datetime'],
-                            y=td_df['volume'],
-                            name='Underlying Stock Volume',
-                            marker_color='rgba(0, 255, 0, 0.6)'
-                        ))
-                        
-                        fig.update_layout(
-                            title=f"{hist_ticker} Historical Volume ({time_range})",
-                            xaxis_title="Date",
-                            yaxis_title="Volume",
-                            template="plotly_dark",
-                            hovermode="x unified"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        max_idx = td_df['volume'].idxmax()
-                        max_day = td_df.loc[max_idx, 'datetime']
-                        max_vol = td_df.loc[max_idx, 'volume']
-                        st.success(f" **Biggest Spike Detected:** {max_day.strftime('%Y-%m-%d')} with {int(max_vol):,} shares traded.")
-                    else:
-                        st.error("Could not fetch data from TwelveData. Check ticker symbol or API limits.")
-
-        # TAB 3: EXECUTIVE SUMMARY
-        with tab3:
             st.subheader("Executive Summary - Key Findings")
             total_premium = float(df['premium'].sum())
             total_volume = int(df['volume'].sum())
@@ -301,8 +184,44 @@ if scan_btn:
             fig.update_layout(template='plotly_dark')
             st.plotly_chart(fig, use_container_width=True)
 
-        # TAB 4: PREMIUM FLOW
-        with tab4:
+        # TAB 2: HISTORICAL VOLUME TABLE (SIMPLIFIED & STABLE)
+        with tab2:
+            st.subheader("📈 Historical Volume Table")
+            st.markdown("Identify the exact day or week where stock volume spiked massively.")
+            
+            hist_ticker = st.text_input("Enter Ticker for Historical View", value="AAPL").upper()
+            time_range = st.radio("Select Time Range", ["Last 5 Days", "Last 30 Days", "Last 6 Months"], horizontal=True)
+            
+            if st.button("Show Historical Data", type="primary"):
+                period_map = {"Last 5 Days": "5d", "Last 30 Days": "1mo", "Last 6 Months": "6mo"}
+                period = period_map[time_range]
+                
+                with st.spinner(f"Fetching {time_range} data for {hist_ticker}..."):
+                    try:
+                        hist_data = yf.Ticker(hist_ticker).history(period=period)
+                        
+                        if not hist_data.empty:
+                            # Format the table nicely
+                            display_hist = hist_data[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                            display_hist['Volume'] = display_hist['Volume'].apply(lambda x: f"{int(x):,}")
+                            display_hist['Open'] = display_hist['Open'].apply(lambda x: f"${x:.2f}")
+                            display_hist['High'] = display_hist['High'].apply(lambda x: f"${x:.2f}")
+                            display_hist['Low'] = display_hist['Low'].apply(lambda x: f"${x:.2f}")
+                            display_hist['Close'] = display_hist['Close'].apply(lambda x: f"${x:.2f}")
+                            
+                            st.dataframe(display_hist, use_container_width=True)
+                            
+                            # Highlight the biggest spike
+                            max_day = hist_data['Volume'].idxmax()
+                            max_vol = hist_data.loc[max_day, 'Volume']
+                            st.success(f"🔍 **Biggest Volume Spike:** {max_day.strftime('%Y-%m-%d')} with {int(max_vol):,} shares traded.")
+                        else:
+                            st.error("Could not fetch historical data. Check ticker symbol.")
+                    except Exception as e:
+                        st.error(f"Failed to load data: {str(e)}")
+
+        # TAB 3: PREMIUM FLOW
+        with tab3:
             st.subheader("Premium Flow Analysis by Ticker")
             premium_data = []
             for ticker in df['ticker'].unique():
@@ -317,12 +236,12 @@ if scan_btn:
                     'Ticker': ticker, 'Call Premium': f"${calls_prem:,.0f}", 'Put Premium': f"${puts_prem:,.0f}",
                     'Total Premium': f"${total_prem:,.0f}", 'Baseline Premium': f"${baseline_prem:,.0f}",
                     'Premium Multiplier': f"{prem_multiplier:.1f}x",
-                    'Bias': ' BULLISH' if calls_prem > puts_prem else '🔴 BEARISH'
+                    'Bias': '🟢 BULLISH' if calls_prem > puts_prem else ' BEARISH'
                 })
             st.dataframe(pd.DataFrame(premium_data), use_container_width=True, hide_index=True)
 
-        # TAB 5: CONTRACT DETAILS
-        with tab5:
+        # TAB 4: CONTRACT DETAILS
+        with tab4:
             st.subheader("Complete Contract-Level Dataset")
             display_cols = ['ticker', 'type', 'strike', 'expiry', 'moneyness', 'volume', 'open_interest', 'iv', 'premium', 'vol_oi_ratio', 'unusualness_score', 'is_block_trade', 'is_sweep']
             display_df = df[display_cols].copy()
@@ -333,14 +252,14 @@ if scan_btn:
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button("📥 Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
 
-        # TAB 6: BLOCK TRADES
-        with tab6:
-            st.subheader("🐋 Block Trades & Sweeps")
+        # TAB 5: BLOCK TRADES
+        with tab5:
+            st.subheader(" Block Trades & Sweeps")
             block_trades_df = df[df['is_block_trade'] | df['is_sweep']].copy()
             if not block_trades_df.empty:
                 block_summary = []
                 for _, row in block_trades_df.iterrows():
-                    size_cat = ' MEGA BLOCK' if row['volume'] >= 5000 else ('Large Block' if row['is_block_trade'] else '🔄 Sweep')
+                    size_cat = '🐋 MEGA BLOCK' if row['volume'] >= 5000 else ('Large Block' if row['is_block_trade'] else '🔄 Sweep')
                     block_summary.append({
                         'Ticker': row['ticker'], 'Type': row['type'], 'Strike': f"${row['strike']}",
                         'Expiry': row['expiry'], 'Moneyness': f"{row['moneyness']*100:+.1f}%",
