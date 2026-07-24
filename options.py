@@ -35,50 +35,6 @@ def safe_ratio(num, denom, cap=100.0):
     else:
         return num / denom if denom > 0 else cap
 
-@st.cache_data(ttl=7200)
-def get_historical_percentiles(ticker, current_volume, current_premium):
-    """Calculate historical percentiles - FIXED TO PREVENT 100TH PERCENTILE"""
-    try:
-        tkr = yf.Ticker(ticker)
-        expiries = tkr.options[:3]
-        
-        hist_volumes = []
-        hist_premiums = []
-        
-        for exp in expiries:
-            try:
-                chain = tkr.option_chain(exp)
-                if not chain.calls.empty:
-                    vol = chain.calls['volume'].fillna(0).sum() + chain.puts['volume'].fillna(0).sum()
-                    prem = (chain.calls['volume'].fillna(0) * chain.calls['lastPrice'].fillna(0) * 100).sum() + \
-                           (chain.puts['volume'].fillna(0) * chain.puts['lastPrice'].fillna(0) * 100).sum()
-                    if vol > 0:
-                        hist_volumes.append(vol)
-                        hist_premiums.append(prem)
-            except:
-                continue
-        
-        if len(hist_volumes) >= 2:
-            vol_sorted = sorted(hist_volumes)
-            prem_sorted = sorted(hist_premiums)
-            
-            # FIXED: Use (n-1) method to prevent 100th percentile
-            vol_rank = np.searchsorted(vol_sorted, current_volume)
-            prem_rank = np.searchsorted(prem_sorted, current_premium)
-            
-            # Calculate percentile with proper capping
-            vol_percentile = (vol_rank / (len(vol_sorted) - 1)) * 100 if len(vol_sorted) > 1 else 50
-            prem_percentile = (prem_rank / (len(prem_sorted) - 1)) * 100 if len(prem_sorted) > 1 else 50
-            
-            # Cap at 99.9th percentile (never 100)
-            vol_percentile = max(0, min(99.9, vol_percentile))
-            prem_percentile = max(0, min(99.9, prem_percentile))
-            
-            return vol_percentile, prem_percentile
-        return 50, 50
-    except:
-        return 50, 50
-
 @st.cache_data(ttl=3600)
 def get_historical_options_volume(ticker):
     try:
@@ -246,12 +202,11 @@ if scan_btn:
     else:
         st.success(f"Identified {len(df)} institutional-grade opportunities!")
         
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        tab1, tab2, tab3, tab4 = st.tabs([
             " Executive Summary", 
             "💰 Premium Flow Analysis", 
-            " Historical Context", 
             "📋 Contract Details",
-            " Block Trades & Sweeps"
+            " Block Trades"
         ])
         
         with tab1:
@@ -276,9 +231,6 @@ if scan_btn:
             
             summary_data = []
             for _, row in top_10.iterrows():
-                vol_percentile, prem_percentile = get_historical_percentiles(
-                    row['ticker'], int(row['volume']), float(row['premium'])
-                )
                 iv_percentile = calculate_iv_percentile(row['ticker'], float(row['iv']))
                 
                 summary_data.append({
@@ -288,9 +240,8 @@ if scan_btn:
                     'Expiry': row['expiry'],
                     'Volume': f"{int(row['volume']):,}",
                     'Premium': f"${float(row['premium']):,.0f}",
-                    'Volume Percentile': f"{vol_percentile:.1f}th",
                     'IV Percentile': f"{iv_percentile:.0f}th",
-                    'Block Trade': '✅' if row['is_block_trade'] else '❌'
+                    'Block Trade': '✅' if row['is_block_trade'] else ''
                 })
             
             st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
@@ -325,40 +276,6 @@ if scan_btn:
             st.dataframe(pd.DataFrame(premium_data), use_container_width=True, hide_index=True)
         
         with tab3:
-            st.subheader("Historical Volume & Percentile Analysis")
-            st.markdown("Shows where current activity ranks vs historical patterns")
-            
-            historical_data = []
-            for ticker in df['ticker'].unique():
-                tkr_df = df[df['ticker'] == ticker]
-                current_vol = int(tkr_df['volume'].sum())
-                current_prem = float(tkr_df['premium'].sum())
-                
-                hist_total_vol, _ = get_historical_options_volume(ticker)
-                
-                vol_percentile, prem_percentile = get_historical_percentiles(ticker, current_vol, current_prem)
-                
-                if hist_total_vol > 0:
-                    vol_multiplier = min(current_vol / hist_total_vol, 100.0)
-                else:
-                    vol_multiplier = 0
-                
-                historical_data.append({
-                    'Ticker': ticker,
-                    'Current Volume': f"{current_vol:,}",
-                    'Normal Volume': f"{int(hist_total_vol):,}",
-                    'Volume Spike': f"{vol_multiplier:.1f}x",
-                    'Volume Percentile': f"{vol_percentile:.1f}th percentile",
-                    'Premium Percentile': f"{prem_percentile:.1f}th percentile",
-                    'Interpretation': f"Higher than {vol_percentile:.1f}% of historical days" if vol_percentile > 0 else "Insufficient data"
-                })
-            
-            st.dataframe(pd.DataFrame(historical_data), use_container_width=True, hide_index=True)
-            
-            st.markdown("---")
-            st.info("**Percentile Interpretation:** 95th percentile = more unusual than 95% of days. 50th = average.")
-        
-        with tab4:
             st.subheader("Complete Contract-Level Dataset")
             
             display_cols = [
@@ -379,8 +296,8 @@ if scan_btn:
             st.download_button(" Download Complete Dataset", data=csv, 
                              file_name="institutional_options_flow.csv", mime="text/csv")
         
-        with tab5:
-            st.subheader(" Block Trades & Sweep Detection")
+        with tab4:
+            st.subheader(" Block Trades Detection")
             st.markdown("Institutional-sized trades (>1000 contracts)")
             
             block_trades_df = df[df['is_block_trade']].copy()
