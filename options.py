@@ -1,3 +1,4 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -6,7 +7,7 @@ from datetime import datetime
 import warnings
 import plotly.express as px
 import plotly.graph_objects as go
-import time # Added to prevent Yahoo Finance rate limits
+import time
 
 warnings.filterwarnings('ignore')
 
@@ -24,11 +25,8 @@ hide_menu_style = """
         """
 st.markdown(hide_menu_style, unsafe_allow_html=True)
 
-# Full Large Cap Tech List (15 Stocks)
-LARGE_CAP_TECH = [
-    "AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", 
-    "AVGO", "ORCL", "CRM", "AMD", "ADBE", "NFLX", "INTC", "CSCO"
-]
+# 10 Core Large Cap Tech Stocks (Reduced from 15 to prevent timeouts)
+LARGE_CAP_TECH = ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AVGO", "AMD", "NFLX"]
 
 def safe_ratio(num, denom, cap=100.0):
     if isinstance(num, pd.Series):
@@ -48,7 +46,7 @@ def get_baseline_volume(ticker):
     except:
         return 50000, 1000000
 
-@st.cache_data(ttl=600) # Increased cache time for sector scanning
+# REMOVED CACHE HERE TO PREVENT STREAMLIT FROM REMEMBERING ERRORS
 def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     """Scans a single ticker safely"""
     try:
@@ -58,7 +56,6 @@ def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         current_price = float(hist['Close'].iloc[-1])
         
         all_data = []
-        # Only check next 2 expirations to speed up scanning
         for exp in tkr.options[:2]: 
             try:
                 chain = tkr.option_chain(exp)
@@ -125,7 +122,7 @@ def scan_single_ticker(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         
         df['unusualness_score'] = score
         return df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
-    except Exception as e:
+    except:
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
@@ -173,7 +170,7 @@ if scan_btn:
             "💰 Premium Flow", "📋 Contract Details", " Block Trades"
         ])
         
-        # TAB 1: SECTOR SCREENER (FULL LIST + THROTTLED)
+        # TAB 1: SECTOR SCREENER
         with tab1:
             st.subheader("🏆 Large Cap Tech Unusual Activity Screener")
             st.markdown(f"Scans {len(LARGE_CAP_TECH)} major tech stocks. (Takes ~15 seconds)")
@@ -183,7 +180,6 @@ if scan_btn:
                 status_text = st.empty()
                 sector_results = []
                 
-                # Loop through all 15 stocks with a delay to prevent Yahoo rate limits
                 for i, ticker in enumerate(LARGE_CAP_TECH):
                     status_text.text(f"Scanning {ticker} ({i+1}/{len(LARGE_CAP_TECH)})...")
                     
@@ -195,7 +191,7 @@ if scan_btn:
                         blocks = int(tkr_df['is_block_trade'].sum())
                         call_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
                         put_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                        bias = "🟢 BULLISH" if call_vol > put_vol else " BEARISH"
+                        bias = "🟢 BULLISH" if call_vol > put_vol else "🔴 BEARISH"
                         
                         sector_results.append({
                             'Ticker': ticker,
@@ -205,8 +201,8 @@ if scan_btn:
                             'Bias': bias
                         })
                     
-                    # CRITICAL FIX: Sleep to prevent Yahoo Finance from blocking us
-                    time.sleep(0.3) 
+                    # 1 FULL SECOND SLEEP TO PREVENT YAHOO BLOCKING US
+                    time.sleep(1) 
                     progress_bar.progress((i + 1) / len(LARGE_CAP_TECH))
                 
                 status_text.text("Scan Complete!")
@@ -216,9 +212,9 @@ if scan_btn:
                     st.subheader("Top Companies by Unusual Premium")
                     st.dataframe(sector_df.style.format({'Unusual Premium': '${:,.0f}', 'Unusual Volume': '{:,}'}), use_container_width=True, hide_index=True)
                 else:
-                    st.warning("No unusual activity found in this sector. Try lowering Min Premium in the sidebar to $10,000.")
+                    st.warning("No unusual activity found. Try lowering Min Premium in the sidebar to $10,000.")
 
-        # TAB 2: HISTORICAL TREND (MULTIINDEX FIX)
+        # TAB 2: HISTORICAL TREND (FIXED WITH YF.TICKER)
         with tab2:
             st.subheader("📈 Historical Volume Trend")
             st.markdown("Identify the exact day or week where volume spiked massively.")
@@ -232,15 +228,8 @@ if scan_btn:
                 
                 with st.spinner(f"Fetching {time_range} data for {hist_ticker}..."):
                     try:
-                        # FIX: Use yf.download with auto_adjust
-                        hist_data = yf.download(hist_ticker, period=period, progress=False, auto_adjust=True)
-                        
-                        # CRITICAL FIX: Flatten MultiIndex columns if Yahoo returns them
-                        if isinstance(hist_data.columns, pd.MultiIndex):
-                            hist_data.columns = hist_data.columns.get_level_values(0)
-                        
-                        # Drop any NaN values that crash Plotly
-                        hist_data = hist_data.dropna()
+                        # USING YF.TICKER.HISTORY() TO AVOID MULTIINDEX BUGS
+                        hist_data = yf.Ticker(hist_ticker).history(period=period)
                         
                         if not hist_data.empty and 'Volume' in hist_data.columns:
                             fig = go.Figure()
@@ -312,7 +301,7 @@ if scan_btn:
                     'Ticker': ticker, 'Call Premium': f"${calls_prem:,.0f}", 'Put Premium': f"${puts_prem:,.0f}",
                     'Total Premium': f"${total_prem:,.0f}", 'Baseline Premium': f"${baseline_prem:,.0f}",
                     'Premium Multiplier': f"{prem_multiplier:.1f}x",
-                    'Bias': '🟢 BULLISH' if calls_prem > puts_prem else ' BEARISH'
+                    'Bias': ' BULLISH' if calls_prem > puts_prem else '🔴 BEARISH'
                 })
             st.dataframe(pd.DataFrame(premium_data), use_container_width=True, hide_index=True)
 
@@ -326,7 +315,7 @@ if scan_btn:
             display_df['unusualness_score'] = display_df['unusualness_score'].round(2)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(" Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
+            st.download_button("📥 Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
 
         # TAB 6: BLOCK TRADES
         with tab6:
