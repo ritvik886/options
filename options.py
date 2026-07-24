@@ -12,11 +12,7 @@ warnings.filterwarnings('ignore')
 st.set_page_config(
     page_title="Unusual Options Activity Scanner",
     layout="wide",
-    menu_items={
-        'Get help': None,
-        'Report a bug': None,
-        'About': None
-    }
+    menu_items={'Get help': None, 'Report a bug': None, 'About': None}
 )
 
 hide_menu_style = """
@@ -27,7 +23,13 @@ hide_menu_style = """
         """
 st.markdown(hide_menu_style, unsafe_allow_html=True)
 
-DEFAULT_TICKERS = "AAPL, NVDA, TSLA"
+# --- SECTOR WATCHLISTS ---
+SECTOR_WATCHLISTS = {
+    "Large Cap Tech": ["AAPL", "MSFT", "NVDA", "GOOGL", "META", "AMZN", "TSLA", "AVGO", "ORCL", "CRM", "AMD", "INTC", "CSCO", "ADBE", "NFLX"],
+    "Semiconductors": ["NVDA", "AMD", "INTC", "AVGO", "TSM", "QCOM", "TXN", "MU", "AMAT", "LRCX", "KLAC", "MRVL"],
+    "Financials": ["JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "BLK", "C", "AXP", "SCHW", "CB"],
+    "Healthcare": ["UNH", "LLY", "JNJ", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "AMGN"]
+}
 
 def safe_ratio(num, denom, cap=100.0):
     if isinstance(num, pd.Series):
@@ -37,54 +39,32 @@ def safe_ratio(num, denom, cap=100.0):
 
 @st.cache_data(ttl=3600)
 def get_baseline_volume(ticker):
-    """
-    Get realistic baseline volume based on stock's typical options activity.
-    Uses stock volume to estimate normal options flow (typically 1-5% of stock volume)
-    """
     try:
         tkr = yf.Ticker(ticker)
         hist = tkr.history(period="3mo")
         if not hist.empty:
             avg_stock_volume = hist['Volume'].mean()
-            # Options volume is typically 1-5% of stock volume
-            baseline_options_volume = avg_stock_volume * 0.02  # 2% baseline
-            baseline_premium = baseline_options_volume * 2.0 * 100  # rough avg option price
+            baseline_options_volume = avg_stock_volume * 0.02
+            baseline_premium = baseline_options_volume * 2.0 * 100
             return baseline_options_volume, baseline_premium
-        return 50000, 1000000  # Default baseline
+        return 50000, 1000000
     except:
         return 50000, 1000000
 
 def calculate_iv_rank(ticker, current_iv):
-    """
-    Estimate IV rank by comparing to realized volatility.
-    Note: This is an estimate since yfinance doesn't provide historical IV data.
-    """
     try:
-        if current_iv <= 0:
-            return 50
-        
+        if current_iv <= 0: return 50
         hist = yf.Ticker(ticker).history(period="1y")
         if len(hist) > 30:
             hist_vol = hist['Close'].pct_change().dropna().std() * np.sqrt(252)
-            
-            if hist_vol <= 0:
-                return 50
-            
+            if hist_vol <= 0: return 50
             iv_ratio = current_iv / hist_vol
-            
-            # Convert ratio to approximate rank
-            if iv_ratio >= 2.5:
-                return 95
-            elif iv_ratio >= 2.0:
-                return 85
-            elif iv_ratio >= 1.5:
-                return 70
-            elif iv_ratio >= 1.0:
-                return 50
-            elif iv_ratio >= 0.7:
-                return 30
-            else:
-                return 15
+            if iv_ratio >= 2.5: return 95
+            elif iv_ratio >= 2.0: return 85
+            elif iv_ratio >= 1.5: return 70
+            elif iv_ratio >= 1.0: return 50
+            elif iv_ratio >= 0.7: return 30
+            else: return 15
         return 50
     except:
         return 50
@@ -107,63 +87,46 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
             for exp in tkr.options[:3]: 
                 try:
                     chain = tkr.option_chain(exp)
-                    for opt_type, df in [('Call', chain.calls), ('Put', chain.puts)]:
-                        if df.empty:
-                            continue
-                        df = df.copy()
-                        df['ticker'], df['expiry'], df['type'] = ticker, exp, opt_type
-                        df['underlying_price'] = current_price
-                        df = df.rename(columns={'openInterest': 'open_interest', 'impliedVolatility': 'iv'})
-                        all_data.append(df)
+                    for opt_type, opt_df in [('Call', chain.calls), ('Put', chain.puts)]:
+                        if opt_df.empty: continue
+                        opt_df = opt_df.copy()
+                        opt_df['ticker'], opt_df['expiry'], opt_df['type'] = ticker, exp, opt_type
+                        opt_df['underlying_price'] = current_price
+                        opt_df = opt_df.rename(columns={'openInterest': 'open_interest', 'impliedVolatility': 'iv'})
+                        all_data.append(opt_df)
                 except Exception as e:
-                    failed_tick.append(f"{ticker} {exp} ({str(e)[:50]})")
+                    failed_tick.append(f"{ticker} {exp} ({str(e)[:30]})")
                     continue
         except Exception as e:
-            failed_tick.append(f"{ticker} ({str(e)[:50]})")
+            failed_tick.append(f"{ticker} ({str(e)[:30]})")
             continue
 
     if not all_data:
         return pd.DataFrame(), failed_tick
     
     df = pd.concat(all_data, ignore_index=True)
-    
-    # Fill NaN values safely
     df['volume'] = df['volume'].fillna(0).astype(int)
     df['open_interest'] = df['open_interest'].fillna(0).astype(int)
     df['iv'] = df['iv'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
     df['lastPrice'] = df['lastPrice'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
-    
-    # Calculate premium
     df['premium'] = df['volume'] * df['lastPrice'] * 100
     
-    # FIX #1: Use open_interest as proxy for typical daily volume (5% of OI)
-    # This is more realistic than using today's volume
+    # Fixed: Realistic proxy for daily volume (5% of Open Interest)
     df['avg_volume_20d'] = df['open_interest'].apply(lambda x: max(x * 0.05, 10.0))
     
-    # Block trade detection - scaled by ticker liquidity
     df['avg_oi_for_ticker'] = df.groupby('ticker')['open_interest'].transform('mean')
-    df['is_block_trade'] = df.apply(
-        lambda row: row['volume'] >= max(1000, row['avg_oi_for_ticker'] * 0.1), axis=1
-    )
-    
-    # Sweep detection - medium-sized aggressive trades
+    df['is_block_trade'] = df.apply(lambda row: row['volume'] >= max(1000, row['avg_oi_for_ticker'] * 0.1), axis=1)
     df['is_sweep'] = (df['volume'] >= 500) & (df['volume'] <= 2000)
-    
-    # Calculate moneyness (how far OTM/ITM)
     df['moneyness'] = (df['strike'] - df['underlying_price']) / df['underlying_price']
     
-    # Calculate ratios safely
     df['vol_oi_ratio'] = safe_ratio(df['volume'], df['open_interest'])
     df['vol_avg_ratio'] = safe_ratio(df['volume'], df['avg_volume_20d'])
     
-    # Time calculations
     today = datetime.now().date()
     df['days_to_expiry'] = (pd.to_datetime(df['expiry']) - pd.Timestamp(today)).dt.days
     df['days_to_expiry'] = df['days_to_expiry'].fillna(30).astype(int)
     df['is_weekly'] = df['days_to_expiry'] <= 7
-    df['is_monthly'] = (df['days_to_expiry'] > 7) & (df['days_to_expiry'] <= 30)
     
-    # Build conditions list
     conditions = [
         df['volume'] >= vol_oi * df['open_interest'],
         df['volume'] >= vol_avg * df['avg_volume_20d'],
@@ -171,105 +134,158 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         df['is_block_trade'],
     ]
     
-    # FIX #2: Actually use otm_pct parameter
+    # Fixed: Actually using the sidebar parameters
     if otm_pct > 0:
-        otm_filter = np.where(
-            (df['type'] == 'Call') & (df['moneyness'] >= otm_pct), True,
-            np.where((df['type'] == 'Put') & (df['moneyness'] <= -otm_pct), True, False)
-        )
+        otm_filter = np.where((df['type'] == 'Call') & (df['moneyness'] >= otm_pct), True,
+                              np.where((df['type'] == 'Put') & (df['moneyness'] <= -otm_pct), True, False))
         conditions.append(otm_filter)
-    
-    # FIX #2: Actually use iv_mult parameter
     if iv_mult > 1.0:
-        iv_filter = df['iv'] >= (iv_mult * 0.25)  # 0.25 is rough baseline IV
-        conditions.append(iv_filter)
+        conditions.append(df['iv'] >= (iv_mult * 0.25))
     
     df['is_unusual'] = np.logical_or.reduce(conditions)
     
-    # FIX #8: Normalize score components to [0,1] before weighting
     score = pd.Series(0.0, index=df.index)
-    
-    # Volume/OI ratio component (normalized)
     mask = df['vol_oi_ratio'] >= vol_oi
-    normalized_vol_oi = (df.loc[mask, 'vol_oi_ratio'] / vol_oi).clip(0, 10) / 10
-    score[mask] += 3.0 * normalized_vol_oi
-    
-    # Premium component (normalized)
+    score[mask] += 3.0 * (df.loc[mask, 'vol_oi_ratio'] / vol_oi).clip(0, 10) / 10
     mask = df['premium'] >= min_prem
-    normalized_prem = (df.loc[mask, 'premium'] / min_prem).clip(0, 10) / 10
-    score[mask] += 2.5 * normalized_prem
-    
-    # Block trade component
+    score[mask] += 2.5 * (df.loc[mask, 'premium'] / min_prem).clip(0, 10) / 10
     mask = df['is_block_trade']
     score[mask] += 4.0
-    
-    # Sweep component (FIX #5: Actually use sweep detection)
     mask = df['is_sweep']
     score[mask] += 1.5
-    
-    # Weekly expiry component
     mask = df['is_weekly']
     score[mask] += 2.0
-    
-    # OTM component (higher score for more speculative bets)
-    otm_score = np.abs(df['moneyness']).clip(0, 0.2) / 0.2  # Normalize to [0,1]
-    score += 1.5 * otm_score
+    score += 1.5 * (np.abs(df['moneyness']).clip(0, 0.2) / 0.2)
     
     df['unusualness_score'] = score
-    
-    # Return only unusual contracts, sorted by score
     result = df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
-    
-    if result.empty:
-        return pd.DataFrame(), failed_tick
-    
     return result, failed_tick
 
-st.title(" Unusual Options Activity Scanner")
+# --- UI ---
+st.title("🔍 Unusual Options Activity Scanner")
 st.markdown("**Detect unusual options flow with institutional-grade metrics**")
-st.info("⚠️ Volume data is snapshot-based and may not reflect intraday accumulation")
+st.info("⚠️ Volume data is snapshot-based. Historical options data requires paid feeds; stock volume used as proxy.")
 
 with st.sidebar:
-    st.header("️ Configuration")
-    tickers_input = st.text_input("Tickers (comma separated)", value=DEFAULT_TICKERS)
+    st.header("⚙️ Configuration")
+    tickers_input = st.text_input("Tickers (comma separated)", value="AAPL, NVDA, TSLA")
     
     st.subheader("Detection Thresholds")
     vol_oi = st.slider("Vol / OI Ratio", 1.0, 20.0, 3.0, 0.5)
     vol_avg = st.slider("Vol / Avg Vol Ratio", 1.0, 20.0, 5.0, 0.5)
     min_prem = st.number_input("Min Premium ($)", value=100000, step=50000)
-    otm_pct = st.slider("OTM % Threshold (0 = include all)", 0.0, 0.30, 0.0, 0.05)
-    iv_mult = st.slider("IV Multiplier (1.0 = include all)", 1.0, 5.0, 1.0, 0.1)
+    otm_pct = st.slider("OTM % Threshold (0 = all)", 0.0, 0.30, 0.0, 0.05)
+    iv_mult = st.slider("IV Multiplier (1.0 = all)", 1.0, 5.0, 1.0, 0.1)
     
-    scan_btn = st.button(" Run Scan", type="primary", use_container_width=True)
+    scan_btn = st.button("🚀 Run Scan", type="primary", use_container_width=True)
 
+# --- MAIN APP LOGIC ---
 if scan_btn:
-    with st.spinner("Fetching options data and analyzing..."):
+    with st.spinner("Fetching options data..."):
         df, failed_tickers = scan_options(tickers_input, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
     
-    # FIX #6: Show failed tickers
     if failed_tickers:
-        st.warning(f"⚠️ Failed to fetch: {', '.join(failed_tickers[:5])}" + 
-                  (f" and {len(failed_tickers)-5} more" if len(failed_tickers) > 5 else ""))
+        st.warning(f"⚠️ Failed to fetch: {', '.join(failed_tickers[:3])}")
     
     if df.empty:
-        st.warning("No unusual activity detected. Try lowering thresholds.")
+        st.warning("No unusual activity detected.")
     else:
         st.success(f"Identified {len(df)} unusual contracts!")
         
-        tab1, tab2, tab3, tab4 = st.tabs([
-            " Executive Summary", 
-            " Premium Flow", 
-            "📋 Contract Details",
-            " Block Trades"
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "🏆 Sector Screener", " Historical Trend", "📊 Executive Summary", 
+            "💰 Premium Flow", "📋 Contract Details", "🐋 Block Trades"
         ])
         
+        # TAB 1: SECTOR SCREENER
         with tab1:
-            st.subheader("Executive Summary - Key Findings")
+            st.subheader("🏆 Sector Unusual Activity Screener")
+            st.markdown("Scans top companies in a sector to find the highest unusual options flow.")
             
+            selected_sector = st.selectbox("Select Sector", list(SECTOR_WATCHLISTS.keys()))
+            sector_tickers = SECTOR_WATCHLISTS[selected_sector]
+            
+            if st.button(f"Scan {selected_sector} Sector", type="primary"):
+                progress_bar = st.progress(0)
+                sector_results = []
+                
+                for i, ticker in enumerate(sector_tickers):
+                    try:
+                        # Unpack correctly to avoid errors
+                        tkr_df, _ = scan_options(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
+                        if not tkr_df.empty:
+                            total_prem = float(tkr_df['premium'].sum())
+                            total_vol = int(tkr_df['volume'].sum())
+                            blocks = int(tkr_df['is_block_trade'].sum())
+                            
+                            call_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
+                            put_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                            bias = "🟢 BULLISH" if call_vol > put_vol else " BEARISH"
+                            
+                            sector_results.append({
+                                'Ticker': ticker,
+                                'Unusual Premium': total_prem,
+                                'Unusual Volume': total_vol,
+                                'Block Trades': blocks,
+                                'Bias': bias
+                            })
+                    except:
+                        pass
+                    progress_bar.progress((i + 1) / len(sector_tickers))
+                
+                if sector_results:
+                    sector_df = pd.DataFrame(sector_results).sort_values('Unusual Premium', ascending=False)
+                    st.subheader(f"Top {min(10, len(sector_df))} Companies in {selected_sector}")
+                    st.dataframe(sector_df.head(10).style.format({'Unusual Premium': '${:,.0f}', 'Unusual Volume': '{:,}'}), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("No unusual activity found in this sector at current thresholds. Try lowering Min Premium.")
+
+        # TAB 2: HISTORICAL TREND
+        with tab2:
+            st.subheader("📈 Historical Volume Trend")
+            st.markdown("Identify the exact day or week where volume spiked massively.")
+            
+            hist_ticker = st.text_input("Enter Ticker for Historical View", value="AAPL").upper()
+            time_range = st.radio("Select Time Range", ["Last 5 Days", "Last 30 Days", "Last 6 Months"], horizontal=True)
+            
+            if st.button("Generate Historical Graph", type="primary"):
+                period_map = {"Last 5 Days": "5d", "Last 30 Days": "1mo", "Last 6 Months": "6mo"}
+                period = period_map[time_range]
+                
+                with st.spinner(f"Fetching {time_range} data for {hist_ticker}..."):
+                    hist_data = yf.Ticker(hist_ticker).history(period=period)
+                    
+                    if not hist_data.empty:
+                        # Using stock volume as a proxy for options activity
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(
+                            x=hist_data.index,
+                            y=hist_data['Volume'],
+                            name='Underlying Stock Volume (Proxy)',
+                            marker_color='rgba(0, 255, 0, 0.6)'
+                        ))
+                        
+                        fig.update_layout(
+                            title=f"{hist_ticker} Historical Volume ({time_range})",
+                            xaxis_title="Date",
+                            yaxis_title="Volume",
+                            template="plotly_dark",
+                            hovermode="x unified"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        max_day = hist_data['Volume'].idxmax()
+                        max_vol = hist_data.loc[max_day, 'Volume']
+                        st.success(f"🔍 **Biggest Spike Detected:** {max_day.strftime('%Y-%m-%d')} with {int(max_vol):,} shares traded.")
+                    else:
+                        st.error("Could not fetch historical data.")
+
+        # TAB 3: EXECUTIVE SUMMARY
+        with tab3:
+            st.subheader("Executive Summary - Key Findings")
             total_premium = float(df['premium'].sum())
             total_volume = int(df['volume'].sum())
             block_trades = df[df['is_block_trade']]
-            sweep_trades = df[df['is_sweep']]
             bullish_volume = int(df[df['type'] == 'Call']['volume'].sum())
             bearish_volume = int(df[df['type'] == 'Put']['volume'].sum())
             put_call_ratio = bearish_volume / bullish_volume if bullish_volume > 0 else 0
@@ -280,127 +296,64 @@ if scan_btn:
             col3.metric("Block Trades", f"{len(block_trades)}")
             col4.metric("Put/Call Ratio", f"{put_call_ratio:.2f}")
             
-            # FIX: Add Put/Call Volume Chart
             st.subheader("Call vs Put Volume")
             call_put_data = []
             for ticker in df['ticker'].unique():
                 tkr_df = df[df['ticker'] == ticker]
-                call_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
-                put_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                call_put_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': call_vol})
-                call_put_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': put_vol})
+                call_put_data.append({'Ticker': ticker, 'Type': 'Calls', 'Volume': int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())})
+                call_put_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())})
             
-            call_put_df = pd.DataFrame(call_put_data)
-            fig = px.bar(call_put_df, x='Ticker', y='Volume', color='Type',
-                         barmode='group', title="Unusual Volume: Calls vs Puts",
-                         color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
+            fig = px.bar(pd.DataFrame(call_put_data), x='Ticker', y='Volume', color='Type',
+                         barmode='group', color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
             fig.update_layout(template='plotly_dark')
             st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("---")
-            st.subheader("Top 10 Most Unusual Contracts")
-            top_10 = df.head(10)
-            
-            summary_data = []
-            for _, row in top_10.iterrows():
-                iv_rank = calculate_iv_rank(row['ticker'], float(row['iv']))
-                
-                summary_data.append({
-                    'Ticker': row['ticker'],
-                    'Type': row['type'],
-                    'Strike': f"${row['strike']}",
-                    'Expiry': row['expiry'],
-                    'Moneyness': f"{row['moneyness']*100:+.1f}%",
-                    'Volume': f"{int(row['volume']):,}",
-                    'Premium': f"${float(row['premium']):,.0f}",
-                    'IV Rank (est.)': f"{iv_rank:.0f}th",  # FIX #4: Rename to be honest
-                    'Block/Sweep': ' Block' if row['is_block_trade'] else ('🔄 Sweep' if row['is_sweep'] else '')
-                })
-            
-            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
-        
-        with tab2:
+
+        # TAB 4: PREMIUM FLOW
+        with tab4:
             st.subheader("Premium Flow Analysis by Ticker")
-            st.markdown("Comparing current premium to baseline (2% of avg stock volume)")
-            
             premium_data = []
             for ticker in df['ticker'].unique():
                 tkr_df = df[df['ticker'] == ticker]
                 calls_prem = float(tkr_df[tkr_df['type'] == 'Call']['premium'].sum())
                 puts_prem = float(tkr_df[tkr_df['type'] == 'Put']['premium'].sum())
                 total_prem = calls_prem + puts_prem
-                
-                # Use baseline instead of self-referential comparison
                 _, baseline_prem = get_baseline_volume(ticker)
-                
-                if baseline_prem > 0:
-                    prem_multiplier = min(total_prem / baseline_prem, 100.0)
-                else:
-                    prem_multiplier = 0
+                prem_multiplier = min(total_prem / baseline_prem, 100.0) if baseline_prem > 0 else 0
                 
                 premium_data.append({
-                    'Ticker': ticker,
-                    'Call Premium': f"${calls_prem:,.0f}",
-                    'Put Premium': f"${puts_prem:,.0f}",
-                    'Total Premium': f"${total_prem:,.0f}",
-                    'Baseline Premium': f"${baseline_prem:,.0f}",
+                    'Ticker': ticker, 'Call Premium': f"${calls_prem:,.0f}", 'Put Premium': f"${puts_prem:,.0f}",
+                    'Total Premium': f"${total_prem:,.0f}", 'Baseline Premium': f"${baseline_prem:,.0f}",
                     'Premium Multiplier': f"{prem_multiplier:.1f}x",
-                    'Bias': '🟢 BULLISH' if calls_prem > puts_prem else ' BEARISH'
+                    'Bias': '🟢 BULLISH' if calls_prem > puts_prem else '🔴 BEARISH'
                 })
-            
             st.dataframe(pd.DataFrame(premium_data), use_container_width=True, hide_index=True)
-        
-        with tab3:
+
+        # TAB 5: CONTRACT DETAILS
+        with tab5:
             st.subheader("Complete Contract-Level Dataset")
-            
-            display_cols = [
-                'ticker', 'type', 'strike', 'expiry', 'moneyness',
-                'volume', 'open_interest', 'iv', 'lastPrice', 'premium',
-                'vol_oi_ratio', 'vol_avg_ratio', 'unusualness_score',
-                'is_block_trade', 'is_sweep', 'is_weekly'
-            ]
-            
+            display_cols = ['ticker', 'type', 'strike', 'expiry', 'moneyness', 'volume', 'open_interest', 'iv', 'premium', 'vol_oi_ratio', 'unusualness_score', 'is_block_trade', 'is_sweep']
             display_df = df[display_cols].copy()
             display_df['moneyness'] = display_df['moneyness'].apply(lambda x: f"{x*100:+.1f}%")
-            display_df['iv'] = display_df['iv'].round(4)
             display_df['premium'] = display_df['premium'].round(2)
             display_df['unusualness_score'] = display_df['unusualness_score'].round(2)
-            display_df['vol_oi_ratio'] = display_df['vol_oi_ratio'].round(2)
-            display_df['vol_avg_ratio'] = display_df['vol_avg_ratio'].round(2)
-            
             st.dataframe(display_df, use_container_width=True, hide_index=True)
-            
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(" Download Complete Dataset", data=csv, 
-                             file_name="unusual_options_flow.csv", mime="text/csv")
-        
-        with tab4:
-            st.subheader(" Block Trades & Sweeps")
-            st.markdown("Institutional-sized trades (scaled by ticker liquidity)")
-            
+            st.download_button(" Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
+
+        # TAB 6: BLOCK TRADES
+        with tab6:
+            st.subheader("🐋 Block Trades & Sweeps")
             block_trades_df = df[df['is_block_trade'] | df['is_sweep']].copy()
-            
             if not block_trades_df.empty:
                 block_summary = []
                 for _, row in block_trades_df.iterrows():
-                    size_cat = '🐋 MEGA BLOCK' if row['volume'] >= 5000 else (
-                        ' Large Block' if row['is_block_trade'] else '🔄 Sweep'
-                    )
+                    size_cat = '🐋 MEGA BLOCK' if row['volume'] >= 5000 else ('Large Block' if row['is_block_trade'] else ' Sweep')
                     block_summary.append({
-                        'Ticker': row['ticker'],
-                        'Type': row['type'],
-                        'Strike': f"${row['strike']}",
-                        'Expiry': row['expiry'],
-                        'Moneyness': f"{row['moneyness']*100:+.1f}%",
-                        'Volume': f"{int(row['volume']):,}",
-                        'Premium': f"${float(row['premium']):,.0f}",
-                        'Size Category': size_cat,
-                        'Days to Expiry': int(row['days_to_expiry'])
+                        'Ticker': row['ticker'], 'Type': row['type'], 'Strike': f"${row['strike']}",
+                        'Expiry': row['expiry'], 'Moneyness': f"{row['moneyness']*100:+.1f}%",
+                        'Volume': f"{int(row['volume']):,}", 'Premium': f"${float(row['premium']):,.0f}",
+                        'Size Category': size_cat, 'Days to Expiry': int(row['days_to_expiry'])
                     })
-                
                 st.dataframe(pd.DataFrame(block_summary), use_container_width=True, hide_index=True)
-                
-                st.markdown("---")
-                st.info("**Block Trades:** >1000 contracts or >10% of avg OI. **Sweeps:** 500-2000 contracts (aggressive execution).")
             else:
-                st.warning("No block trades or sweeps detected at current thresholds.")
+                st.warning("No block trades detected.")
