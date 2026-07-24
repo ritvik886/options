@@ -291,4 +291,116 @@ if scan_btn:
                 call_put_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': put_vol})
             
             call_put_df = pd.DataFrame(call_put_data)
-            fig = px.bar(call_put_df, x)
+            fig = px.bar(call_put_df, x='Ticker', y='Volume', color='Type',
+                         barmode='group', title="Unusual Volume: Calls vs Puts",
+                         color_discrete_map={'Calls': '#00FF00', 'Puts': '#FF0000'})
+            fig.update_layout(template='plotly_dark')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.markdown("---")
+            st.subheader("Top 10 Most Unusual Contracts")
+            top_10 = df.head(10)
+            
+            summary_data = []
+            for _, row in top_10.iterrows():
+                iv_rank = calculate_iv_rank(row['ticker'], float(row['iv']))
+                
+                summary_data.append({
+                    'Ticker': row['ticker'],
+                    'Type': row['type'],
+                    'Strike': f"${row['strike']}",
+                    'Expiry': row['expiry'],
+                    'Moneyness': f"{row['moneyness']*100:+.1f}%",
+                    'Volume': f"{int(row['volume']):,}",
+                    'Premium': f"${float(row['premium']):,.0f}",
+                    'IV Rank (est.)': f"{iv_rank:.0f}th",  # FIX #4: Rename to be honest
+                    'Block/Sweep': ' Block' if row['is_block_trade'] else ('🔄 Sweep' if row['is_sweep'] else '')
+                })
+            
+            st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+        
+        with tab2:
+            st.subheader("Premium Flow Analysis by Ticker")
+            st.markdown("Comparing current premium to baseline (2% of avg stock volume)")
+            
+            premium_data = []
+            for ticker in df['ticker'].unique():
+                tkr_df = df[df['ticker'] == ticker]
+                calls_prem = float(tkr_df[tkr_df['type'] == 'Call']['premium'].sum())
+                puts_prem = float(tkr_df[tkr_df['type'] == 'Put']['premium'].sum())
+                total_prem = calls_prem + puts_prem
+                
+                # Use baseline instead of self-referential comparison
+                _, baseline_prem = get_baseline_volume(ticker)
+                
+                if baseline_prem > 0:
+                    prem_multiplier = min(total_prem / baseline_prem, 100.0)
+                else:
+                    prem_multiplier = 0
+                
+                premium_data.append({
+                    'Ticker': ticker,
+                    'Call Premium': f"${calls_prem:,.0f}",
+                    'Put Premium': f"${puts_prem:,.0f}",
+                    'Total Premium': f"${total_prem:,.0f}",
+                    'Baseline Premium': f"${baseline_prem:,.0f}",
+                    'Premium Multiplier': f"{prem_multiplier:.1f}x",
+                    'Bias': '🟢 BULLISH' if calls_prem > puts_prem else ' BEARISH'
+                })
+            
+            st.dataframe(pd.DataFrame(premium_data), use_container_width=True, hide_index=True)
+        
+        with tab3:
+            st.subheader("Complete Contract-Level Dataset")
+            
+            display_cols = [
+                'ticker', 'type', 'strike', 'expiry', 'moneyness',
+                'volume', 'open_interest', 'iv', 'lastPrice', 'premium',
+                'vol_oi_ratio', 'vol_avg_ratio', 'unusualness_score',
+                'is_block_trade', 'is_sweep', 'is_weekly'
+            ]
+            
+            display_df = df[display_cols].copy()
+            display_df['moneyness'] = display_df['moneyness'].apply(lambda x: f"{x*100:+.1f}%")
+            display_df['iv'] = display_df['iv'].round(4)
+            display_df['premium'] = display_df['premium'].round(2)
+            display_df['unusualness_score'] = display_df['unusualness_score'].round(2)
+            display_df['vol_oi_ratio'] = display_df['vol_oi_ratio'].round(2)
+            display_df['vol_avg_ratio'] = display_df['vol_avg_ratio'].round(2)
+            
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(" Download Complete Dataset", data=csv, 
+                             file_name="unusual_options_flow.csv", mime="text/csv")
+        
+        with tab4:
+            st.subheader(" Block Trades & Sweeps")
+            st.markdown("Institutional-sized trades (scaled by ticker liquidity)")
+            
+            block_trades_df = df[df['is_block_trade'] | df['is_sweep']].copy()
+            
+            if not block_trades_df.empty:
+                block_summary = []
+                for _, row in block_trades_df.iterrows():
+                    size_cat = '🐋 MEGA BLOCK' if row['volume'] >= 5000 else (
+                        ' Large Block' if row['is_block_trade'] else '🔄 Sweep'
+                    )
+                    block_summary.append({
+                        'Ticker': row['ticker'],
+                        'Type': row['type'],
+                        'Strike': f"${row['strike']}",
+                        'Expiry': row['expiry'],
+                        'Moneyness': f"{row['moneyness']*100:+.1f}%",
+                        'Volume': f"{int(row['volume']):,}",
+                        'Premium': f"${float(row['premium']):,.0f}",
+                        'Size Category': size_cat,
+                        'Days to Expiry': int(row['days_to_expiry'])
+                    })
+                
+                st.dataframe(pd.DataFrame(block_summary), use_container_width=True, hide_index=True)
+                
+                st.markdown("---")
+                st.info("**Block Trades:** >1000 contracts or >10% of avg OI. **Sweeps:** 500-2000 contracts (aggressive execution).")
+            else:
+                st.warning("No block trades or sweeps detected at current thresholds.")
