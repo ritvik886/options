@@ -51,24 +51,6 @@ def get_baseline_volume(ticker):
     except:
         return 50000, 1000000
 
-def calculate_iv_rank(ticker, current_iv):
-    try:
-        if current_iv <= 0: return 50
-        hist = yf.Ticker(ticker).history(period="1y")
-        if len(hist) > 30:
-            hist_vol = hist['Close'].pct_change().dropna().std() * np.sqrt(252)
-            if hist_vol <= 0: return 50
-            iv_ratio = current_iv / hist_vol
-            if iv_ratio >= 2.5: return 95
-            elif iv_ratio >= 2.0: return 85
-            elif iv_ratio >= 1.5: return 70
-            elif iv_ratio >= 1.0: return 50
-            elif iv_ratio >= 0.7: return 30
-            else: return 15
-        return 50
-    except:
-        return 50
-
 @st.cache_data(ttl=300)
 def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     tickers = [t.strip().upper() for t in tickers_str.split(',') if t.strip()]
@@ -80,7 +62,6 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
             tkr = yf.Ticker(ticker)
             hist = tkr.history(period="5d")
             if hist.empty:
-                failed_tick.append(f"{ticker} (no price data)")
                 continue
             current_price = float(hist['Close'].iloc[-1])
             
@@ -94,15 +75,13 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
                         opt_df['underlying_price'] = current_price
                         opt_df = opt_df.rename(columns={'openInterest': 'open_interest', 'impliedVolatility': 'iv'})
                         all_data.append(opt_df)
-                except Exception as e:
-                    failed_tick.append(f"{ticker} {exp} ({str(e)[:30]})")
+                except:
                     continue
-        except Exception as e:
-            failed_tick.append(f"{ticker} ({str(e)[:30]})")
+        except:
             continue
 
     if not all_data:
-        return pd.DataFrame(), failed_tick
+        return pd.DataFrame()
     
     df = pd.concat(all_data, ignore_index=True)
     df['volume'] = df['volume'].fillna(0).astype(int)
@@ -111,9 +90,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     df['lastPrice'] = df['lastPrice'].fillna(0.0).replace([np.inf, -np.inf], 0.0)
     df['premium'] = df['volume'] * df['lastPrice'] * 100
     
-    # Fixed: Realistic proxy for daily volume (5% of Open Interest)
     df['avg_volume_20d'] = df['open_interest'].apply(lambda x: max(x * 0.05, 10.0))
-    
     df['avg_oi_for_ticker'] = df.groupby('ticker')['open_interest'].transform('mean')
     df['is_block_trade'] = df.apply(lambda row: row['volume'] >= max(1000, row['avg_oi_for_ticker'] * 0.1), axis=1)
     df['is_sweep'] = (df['volume'] >= 500) & (df['volume'] <= 2000)
@@ -134,7 +111,6 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
         df['is_block_trade'],
     ]
     
-    # Fixed: Actually using the sidebar parameters
     if otm_pct > 0:
         otm_filter = np.where((df['type'] == 'Call') & (df['moneyness'] >= otm_pct), True,
                               np.where((df['type'] == 'Put') & (df['moneyness'] <= -otm_pct), True, False))
@@ -159,12 +135,11 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     
     df['unusualness_score'] = score
     result = df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
-    return result, failed_tick
+    return result
 
 # --- UI ---
 st.title("🔍 Unusual Options Activity Scanner")
 st.markdown("**Detect unusual options flow with institutional-grade metrics**")
-st.info("⚠️ Volume data is snapshot-based. Historical options data requires paid feeds; stock volume used as proxy.")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -173,7 +148,7 @@ with st.sidebar:
     st.subheader("Detection Thresholds")
     vol_oi = st.slider("Vol / OI Ratio", 1.0, 20.0, 3.0, 0.5)
     vol_avg = st.slider("Vol / Avg Vol Ratio", 1.0, 20.0, 5.0, 0.5)
-    min_prem = st.number_input("Min Premium ($)", value=100000, step=50000)
+    min_prem = st.number_input("Min Premium ($)", value=50000, step=10000) # Lowered default for better sector scanning
     otm_pct = st.slider("OTM % Threshold (0 = all)", 0.0, 0.30, 0.0, 0.05)
     iv_mult = st.slider("IV Multiplier (1.0 = all)", 1.0, 5.0, 1.0, 0.1)
     
@@ -182,22 +157,19 @@ with st.sidebar:
 # --- MAIN APP LOGIC ---
 if scan_btn:
     with st.spinner("Fetching options data..."):
-        df, failed_tickers = scan_options(tickers_input, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
-    
-    if failed_tickers:
-        st.warning(f"⚠️ Failed to fetch: {', '.join(failed_tickers[:3])}")
+        df = scan_options(tickers_input, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
     
     if df.empty:
-        st.warning("No unusual activity detected.")
+        st.warning("No unusual activity detected. Try lowering Min Premium.")
     else:
         st.success(f"Identified {len(df)} unusual contracts!")
         
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🏆 Sector Screener", " Historical Trend", "📊 Executive Summary", 
-            "💰 Premium Flow", "📋 Contract Details", "🐋 Block Trades"
+            "🏆 Sector Screener", "📈 Historical Trend", "📊 Executive Summary", 
+            "💰 Premium Flow", " Contract Details", "🐋 Block Trades"
         ])
         
-        # TAB 1: SECTOR SCREENER
+        # TAB 1: SECTOR SCREENER (FIXED)
         with tab1:
             st.subheader("🏆 Sector Unusual Activity Screener")
             st.markdown("Scans top companies in a sector to find the highest unusual options flow.")
@@ -206,21 +178,22 @@ if scan_btn:
             sector_tickers = SECTOR_WATCHLISTS[selected_sector]
             
             if st.button(f"Scan {selected_sector} Sector", type="primary"):
-                progress_bar = st.progress(0)
-                sector_results = []
+                # FIX: Scan all tickers at once instead of looping to avoid rate limits
+                sector_tickers_str = ", ".join(sector_tickers)
+                with st.spinner(f"Scanning {len(sector_tickers)} stocks... This takes ~30 seconds."):
+                    sector_df_raw = scan_options(sector_tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
                 
-                for i, ticker in enumerate(sector_tickers):
-                    try:
-                        # Unpack correctly to avoid errors
-                        tkr_df, _ = scan_options(ticker, vol_oi, vol_avg, min_prem, otm_pct, iv_mult)
-                        if not tkr_df.empty:
-                            total_prem = float(tkr_df['premium'].sum())
-                            total_vol = int(tkr_df['volume'].sum())
-                            blocks = int(tkr_df['is_block_trade'].sum())
-                            
-                            call_vol = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
-                            put_vol = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
-                            bias = "🟢 BULLISH" if call_vol > put_vol else " BEARISH"
+                if not sector_df_raw.empty:
+                    sector_results = []
+                    for ticker in sector_tickers:
+                        tkr_data = sector_df_raw[sector_df_raw['ticker'] == ticker]
+                        if not tkr_data.empty:
+                            total_prem = float(tkr_data['premium'].sum())
+                            total_vol = int(tkr_data['volume'].sum())
+                            blocks = int(tkr_data['is_block_trade'].sum())
+                            call_vol = int(tkr_data[tkr_data['type'] == 'Call']['volume'].sum())
+                            put_vol = int(tkr_data[tkr_data['type'] == 'Put']['volume'].sum())
+                            bias = " BULLISH" if call_vol > put_vol else "🔴 BEARISH"
                             
                             sector_results.append({
                                 'Ticker': ticker,
@@ -229,20 +202,19 @@ if scan_btn:
                                 'Block Trades': blocks,
                                 'Bias': bias
                             })
-                    except:
-                        pass
-                    progress_bar.progress((i + 1) / len(sector_tickers))
-                
-                if sector_results:
-                    sector_df = pd.DataFrame(sector_results).sort_values('Unusual Premium', ascending=False)
-                    st.subheader(f"Top {min(10, len(sector_df))} Companies in {selected_sector}")
-                    st.dataframe(sector_df.head(10).style.format({'Unusual Premium': '${:,.0f}', 'Unusual Volume': '{:,}'}), use_container_width=True, hide_index=True)
+                    
+                    if sector_results:
+                        sector_df = pd.DataFrame(sector_results).sort_values('Unusual Premium', ascending=False)
+                        st.subheader(f"Top Companies in {selected_sector}")
+                        st.dataframe(sector_df.head(10).style.format({'Unusual Premium': '${:,.0f}', 'Unusual Volume': '{:,}'}), use_container_width=True, hide_index=True)
+                    else:
+                        st.warning("No unusual activity found. Try lowering Min Premium in the sidebar.")
                 else:
-                    st.warning("No unusual activity found in this sector at current thresholds. Try lowering Min Premium.")
+                    st.warning("No unusual activity found in this sector. Try lowering Min Premium.")
 
-        # TAB 2: HISTORICAL TREND
+        # TAB 2: HISTORICAL TREND (FIXED)
         with tab2:
-            st.subheader("📈 Historical Volume Trend")
+            st.subheader(" Historical Volume Trend")
             st.markdown("Identify the exact day or week where volume spiked massively.")
             
             hist_ticker = st.text_input("Enter Ticker for Historical View", value="AAPL").upper()
@@ -253,10 +225,14 @@ if scan_btn:
                 period = period_map[time_range]
                 
                 with st.spinner(f"Fetching {time_range} data for {hist_ticker}..."):
-                    hist_data = yf.Ticker(hist_ticker).history(period=period)
+                    # FIX: Use yf.download instead of yf.Ticker.history for stability
+                    hist_data = yf.download(hist_ticker, period=period, progress=False)
                     
-                    if not hist_data.empty:
-                        # Using stock volume as a proxy for options activity
+                    # Flatten columns if yfinance returns a MultiIndex
+                    if isinstance(hist_data.columns, pd.MultiIndex):
+                        hist_data.columns = hist_data.columns.get_level_values(0)
+                    
+                    if not hist_data.empty and 'Volume' in hist_data.columns:
                         fig = go.Figure()
                         fig.add_trace(go.Bar(
                             x=hist_data.index,
@@ -278,7 +254,7 @@ if scan_btn:
                         max_vol = hist_data.loc[max_day, 'Volume']
                         st.success(f"🔍 **Biggest Spike Detected:** {max_day.strftime('%Y-%m-%d')} with {int(max_vol):,} shares traded.")
                     else:
-                        st.error("Could not fetch historical data.")
+                        st.error("Could not fetch historical data. Check ticker symbol.")
 
         # TAB 3: EXECUTIVE SUMMARY
         with tab3:
@@ -338,7 +314,7 @@ if scan_btn:
             display_df['unusualness_score'] = display_df['unusualness_score'].round(2)
             st.dataframe(display_df, use_container_width=True, hide_index=True)
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(" Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
+            st.download_button("📥 Download Dataset", data=csv, file_name="unusual_options.csv", mime="text/csv")
 
         # TAB 6: BLOCK TRADES
         with tab6:
@@ -347,7 +323,7 @@ if scan_btn:
             if not block_trades_df.empty:
                 block_summary = []
                 for _, row in block_trades_df.iterrows():
-                    size_cat = '🐋 MEGA BLOCK' if row['volume'] >= 5000 else ('Large Block' if row['is_block_trade'] else ' Sweep')
+                    size_cat = ' MEGA BLOCK' if row['volume'] >= 5000 else ('Large Block' if row['is_block_trade'] else '🔄 Sweep')
                     block_summary.append({
                         'Ticker': row['ticker'], 'Type': row['type'], 'Strike': f"${row['strike']}",
                         'Expiry': row['expiry'], 'Moneyness': f"{row['moneyness']*100:+.1f}%",
