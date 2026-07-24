@@ -143,7 +143,7 @@ def scan_options(tickers_str, vol_oi, vol_avg, min_prem, otm_pct, iv_mult):
     return df[df['is_unusual']].sort_values('unusualness_score', ascending=False)
 
 # --- USER INTERFACE ---
-st.title("🔍 Unusual Options Activity (UOA) Scanner")
+st.title(" Unusual Options Activity (UOA) Scanner")
 
 with st.sidebar:
     st.header("⚙️ Configuration")
@@ -193,16 +193,31 @@ if scan_btn:
             st.markdown("---")
             st.markdown("**Green bars** = Call volume (bullish bets) | **Red bars** = Put volume (bearish bets)")
         
-        # TAB 2: HISTORICAL COMPARISON
+        # TAB 2: HISTORICAL COMPARISON (UPDATED WITH MONEY FLOW TYPE)
         with tab2:
-            st.subheader("Historical Volume Comparison (Current vs Normal)")
-            st.markdown("Shows how much more volume is trading compared to normal weekly averages")
+            st.subheader("Historical Volume & Money Flow Analysis")
+            st.markdown("Shows volume spikes and whether traders are using Fresh Money or just flipping old positions.")
             
             comparison_data = []
             for ticker in df['ticker'].unique():
                 tkr_df = df[df['ticker'] == ticker]
                 current_calls = int(tkr_df[tkr_df['type'] == 'Call']['volume'].sum())
                 current_puts = int(tkr_df[tkr_df['type'] == 'Put']['volume'].sum())
+                
+                # Get total Open Interest for today
+                total_oi_calls = int(tkr_df[tkr_df['type'] == 'Call']['open_interest'].sum())
+                total_oi_puts = int(tkr_df[tkr_df['type'] == 'Put']['open_interest'].sum())
+                
+                # Determine Money Flow Type
+                if current_calls > total_oi_calls:
+                    call_flow = " Fresh Money (Opening)"
+                else:
+                    call_flow = "🟡 Position Flipping (Closing)"
+                    
+                if current_puts > total_oi_puts:
+                    put_flow = "🟢 Fresh Money (Opening)"
+                else:
+                    put_flow = "🟡 Position Flipping (Closing)"
                 
                 hist_calls, hist_puts = get_historical_options_volume(ticker)
                 
@@ -218,17 +233,19 @@ if scan_btn:
                 
                 comparison_data.append({
                     'Ticker': ticker,
-                    'Current Call Volume': f"{current_calls:,}",
-                    'Normal Call Volume': f"{int(hist_calls):,}",
-                    'Call Multiplier': f"{calls_multiplier:.1f}x" if calls_multiplier > 0 else "N/A",
-                    'Current Put Volume': f"{current_puts:,}",
-                    'Normal Put Volume': f"{int(hist_puts):,}",
-                    'Put Multiplier': f"{puts_multiplier:.1f}x" if puts_multiplier > 0 else "N/A",
+                    'Current Call Vol': f"{current_calls:,}",
+                    'Normal Call Vol': f"{int(hist_calls):,}",
+                    'Call Spike': f"{calls_multiplier:.1f}x",
+                    'Call Money Flow': call_flow,
+                    'Current Put Vol': f"{current_puts:,}",
+                    'Normal Put Vol': f"{int(hist_puts):,}",
+                    'Put Spike': f"{puts_multiplier:.1f}x",
+                    'Put Money Flow': put_flow,
                 })
             
             if comparison_data:
                 st.dataframe(pd.DataFrame(comparison_data), use_container_width=True, hide_index=True)
-                st.markdown("**Multiplier** shows how many times higher current volume is vs normal. Example: 1000x means 1000 times more volume than usual!")
+                st.markdown("**Fresh Money** = Volume > Open Interest (Traders are opening brand new positions). **Position Flipping** = Volume < Open Interest (Traders are just exiting or rolling old bets).")
         
         # TAB 3: COMPLETE DATASET
         with tab3:
