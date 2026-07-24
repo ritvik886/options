@@ -319,7 +319,7 @@ if scan_btn:
                 puts_prem = float(tkr_df[tkr_df['type'] == 'Put']['premium'].sum())
                 total_prem = calls_prem + puts_prem
                 
-                _, _, hist_calls_prem, hist_puts_prem = get_historical_options_volume(ticker)
+                hist_vol, hist_total_prem = get_historical_options_volume(ticker)
                 hist_total = hist_calls_prem + hist_puts_prem
                 
                 # CAP MULTIPLIER AT 100X TO PREVENT INSANE NUMBERS
@@ -351,8 +351,8 @@ if scan_btn:
                 current_vol = int(tkr_df['volume'].sum())
                 current_prem = float(tkr_df['premium'].sum())
                 
-                hist_calls, hist_puts, _, _ = get_historical_options_volume(ticker)
-                hist_total = hist_calls + hist_puts
+                hist_total, _ = get_historical_options_volume(ticker)
+                
                 
                 vol_percentile, prem_percentile = get_historical_percentiles(ticker, current_vol, current_prem)
                 
