@@ -37,6 +37,7 @@ def safe_ratio(num, denom, cap=100.0):
 
 @st.cache_data(ttl=7200)
 def get_historical_percentiles(ticker, current_volume, current_premium):
+    """Calculate historical percentiles - FIXED TO PREVENT 100TH PERCENTILE"""
     try:
         tkr = yf.Ticker(ticker)
         expiries = tkr.options[:3]
@@ -61,11 +62,17 @@ def get_historical_percentiles(ticker, current_volume, current_premium):
             vol_sorted = sorted(hist_volumes)
             prem_sorted = sorted(hist_premiums)
             
-            vol_percentile = np.searchsorted(vol_sorted, current_volume) / len(vol_sorted) * 100
-            prem_percentile = np.searchsorted(prem_sorted, current_premium) / len(prem_sorted) * 100
+            # FIXED: Use (n-1) method to prevent 100th percentile
+            vol_rank = np.searchsorted(vol_sorted, current_volume)
+            prem_rank = np.searchsorted(prem_sorted, current_premium)
             
-            vol_percentile = max(0, min(100, vol_percentile))
-            prem_percentile = max(0, min(100, prem_percentile))
+            # Calculate percentile with proper capping
+            vol_percentile = (vol_rank / (len(vol_sorted) - 1)) * 100 if len(vol_sorted) > 1 else 50
+            prem_percentile = (prem_rank / (len(prem_sorted) - 1)) * 100 if len(prem_sorted) > 1 else 50
+            
+            # Cap at 99.9th percentile (never 100)
+            vol_percentile = max(0, min(99.9, vol_percentile))
+            prem_percentile = max(0, min(99.9, prem_percentile))
             
             return vol_percentile, prem_percentile
         return 50, 50
@@ -218,7 +225,7 @@ st.title(" Institutional Options Flow Scanner")
 st.markdown("**Professional-grade unusual options activity detection**")
 
 with st.sidebar:
-    st.header("⚙️ Configuration")
+    st.header("️ Configuration")
     tickers_input = st.text_input("Tickers (comma separated)", value=DEFAULT_TICKERS)
     
     st.subheader("Detection Thresholds")
@@ -244,7 +251,7 @@ if scan_btn:
             "💰 Premium Flow Analysis", 
             " Historical Context", 
             "📋 Contract Details",
-            "🐋 Block Trades & Sweeps"
+            " Block Trades & Sweeps"
         ])
         
         with tab1:
@@ -281,7 +288,7 @@ if scan_btn:
                     'Expiry': row['expiry'],
                     'Volume': f"{int(row['volume']):,}",
                     'Premium': f"${float(row['premium']):,.0f}",
-                    'Volume Percentile': f"{vol_percentile:.0f}th",
+                    'Volume Percentile': f"{vol_percentile:.1f}th",
                     'IV Percentile': f"{iv_percentile:.0f}th",
                     'Block Trade': '✅' if row['is_block_trade'] else '❌'
                 })
@@ -343,7 +350,7 @@ if scan_btn:
                     'Volume Spike': f"{vol_multiplier:.1f}x",
                     'Volume Percentile': f"{vol_percentile:.1f}th percentile",
                     'Premium Percentile': f"{prem_percentile:.1f}th percentile",
-                    'Interpretation': f"Higher than {vol_percentile:.0f}% of historical days" if vol_percentile > 0 else "Insufficient data"
+                    'Interpretation': f"Higher than {vol_percentile:.1f}% of historical days" if vol_percentile > 0 else "Insufficient data"
                 })
             
             st.dataframe(pd.DataFrame(historical_data), use_container_width=True, hide_index=True)
