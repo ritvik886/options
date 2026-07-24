@@ -291,4 +291,4 @@ if scan_btn:
                 call_put_data.append({'Ticker': ticker, 'Type': 'Puts', 'Volume': put_vol})
             
             call_put_df = pd.DataFrame(call_put_data)
-            fig = px.bar(call_put_df, x
+            fig = px.bar(call_put_df, x)
